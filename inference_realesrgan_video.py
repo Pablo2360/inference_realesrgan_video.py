@@ -45,12 +45,14 @@ def get_sub_video(args, num_process, process_idx):
     print(f'duration: {duration}, part_time: {part_time}')
     os.makedirs(osp.join(args.output, f'{args.video_name}_inp_tmp_videos'), exist_ok=True)
     out_path = osp.join(args.output, f'{args.video_name}_inp_tmp_videos', f'{process_idx:03d}.mp4')
-    cmd = [
-        args.ffmpeg_bin, f'-i {args.input}', '-ss', f'{part_time * process_idx}',
-        f'-to {part_time * (process_idx + 1)}' if process_idx != num_process - 1 else '', '-async 1', out_path, '-y'
-    ]
+    start = part_time * process_idx
+    end = part_time * (process_idx + 1)
+    cmd = [args.ffmpeg_bin, '-i', args.input, '-ss', str(start)]
+    if process_idx != num_process - 1:
+        cmd.extend(['-to', str(end)])
+    cmd.extend(['-async', '1', out_path, '-y'])
     print(' '.join(cmd))
-    subprocess.call(' '.join(cmd), shell=True)
+    subprocess.call(cmd, shell=False)
     return out_path
 
 
@@ -268,8 +270,8 @@ def inference_video(args, video_save_path, device=None, total_workers=1, worker_
             print('If you encounter CUDA out of memory, try to set --tile with a smaller number.')
         else:
             writer.write_frame(output)
-
-        torch.cuda.synchronize(device)
+        if device is not None and torch.cuda.is_available():
+            torch.cuda.synchronize(device)
         pbar.update(1)
 
     reader.close()
@@ -279,17 +281,20 @@ def inference_video(args, video_save_path, device=None, total_workers=1, worker_
 def run(args):
     args.video_name = osp.splitext(os.path.basename(args.input))[0]
     video_save_path = osp.join(args.output, f'{args.video_name}_{args.suffix}.mp4')
+    num_gpus = torch.cuda.device_count()
 
     if args.extract_frame_first:
         tmp_frames_folder = osp.join(args.output, f'{args.video_name}_inp_tmp_frames')
         os.makedirs(tmp_frames_folder, exist_ok=True)
-        os.system(f'ffmpeg -i {args.input} -qscale:v 1 -qmin 1 -qmax 1 -vsync 0  {tmp_frames_folder}/frame%08d.png')
+        subprocess.call([
+            args.ffmpeg_bin, '-i', args.input, '-qscale:v', '1', '-qmin', '1', '-qmax', '1', '-vsync', '0',
+            f'{tmp_frames_folder}/frame%08d.png'
+        ], shell=False)
         args.input = tmp_frames_folder
 
-        num_gpus = torch.cuda.device_count()
     num_process = num_gpus * args.num_process_per_gpu
 
-    if num_process < 1:
+    if num_gpus == 0 or num_process < 1:
         num_process = 1
 
     if num_process == 1:
@@ -386,7 +391,7 @@ def main():
 
     if is_video and args.input.endswith('.flv'):
         mp4_path = args.input.replace('.flv', '.mp4')
-        os.system(f'ffmpeg -i {args.input} -codec copy {mp4_path}')
+        subprocess.call([args.ffmpeg_bin, '-i', args.input, '-codec', 'copy', mp4_path], shell=False)
         args.input = mp4_path
 
     if args.extract_frame_first and not is_video:
